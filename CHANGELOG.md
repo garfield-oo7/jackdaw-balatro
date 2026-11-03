@@ -26,6 +26,9 @@ while it is 0.x, a minor release (0.2 → 0.3) can break things, and a patch rel
   many env-steps per second with several threads. `num_threads` counts the calling thread,
   which now steps envs too, and idle threads sleep after 100 µs. The results are the same for
   any thread count.
+- The release wheels for Linux x86_64, macOS arm64 and Windows x64 are built with
+  profile-guided optimisation, which makes their steps about 10% faster. Their results are
+  unchanged. `scripts/pgo.sh build` builds such a wheel locally.
 
 ## [0.2.2] - 2026-10-25
 
