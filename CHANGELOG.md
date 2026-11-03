@@ -14,20 +14,20 @@ while it is 0.x, a minor release (0.2 → 0.3) can break things, and a patch rel
 
 ### Changed
 
-- The engine and the environments run faster: a Gym env steps about 1.7 times as fast, and a
-  new run starts faster. A seed plays the same run, with the same observations, masks and
-  action tables.
+- The engine and the environments run faster: the Rust env steps about 1.8 times as fast,
+  `BalatroGymnasiumEnv` about 1.25 times, and a new run starts a quarter faster. A seed plays
+  the same run, with the same observations, masks and action tables.
 - Importing a snapshot fails when two of its cards share a sort id, or when its
   `next_sort_id` isn't above every card's.
 - `BalatroVectorEnv` spends less time in Python per step (its per-env results come from Rust in
   their final dtypes), and `BalatroGymnasiumEnv` on the Rust engine too (the observation and
   the action mask come in one buffer). What they return is unchanged.
-- `BalatroVectorEnv` steps its envs on its own thread pool instead of rayon's: about twice as
-  many env-steps per second with several threads. `num_threads` counts the calling thread,
-  which now steps envs too, and idle threads sleep after 100 µs. The results are the same for
-  any thread count.
+- `BalatroVectorEnv` steps its envs on its own thread pool instead of rayon's: with 4 threads,
+  1.4 (256 envs) to 2.3 (16 envs) times as many env-steps per second. `num_threads` counts the
+  calling thread, which now steps envs too, and idle threads sleep after 100 µs. The results
+  are the same for any thread count.
 - The release wheels for Linux x86_64, macOS arm64 and Windows x64 are built with
-  profile-guided optimisation, which makes their steps about 10% faster. Their results are
+  profile-guided optimisation, which makes their steps 10 to 15% faster. Their results are
   unchanged. `scripts/pgo.sh build` builds such a wheel locally.
 
 ## [0.2.2] - 2026-10-25
