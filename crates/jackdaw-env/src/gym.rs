@@ -176,6 +176,8 @@ struct ComboCache {
     next: usize,
     /// The current enumeration (slots it used carry this stamp).
     generation: u64,
+    /// The slot [`ComboCache::slot`] returned last.
+    last: usize,
 }
 
 const COMBO_CACHE_SIZE: usize = 8;
@@ -183,27 +185,33 @@ const COMBO_CACHE_SIZE: usize = 8;
 impl ComboCache {
     /// The slot holding the selections of `lower..=upper` of `legal` (by size, then
     /// lexicographically) that hold `required`, enumerated once per key.
+    /// `legal_bits` is `legal` as bits by hand index (`None` with a card at index 128 or more).
     fn slot(
         &mut self,
         legal: &[usize],
+        legal_bits: Option<u128>,
         lower: usize,
         upper: usize,
         required: Option<usize>,
     ) -> usize {
-        let key = legal
-            .iter()
-            .try_fold(0u128, |acc, &i| (i < 128).then(|| acc | (1u128 << i)))
-            .map(|bits| ComboKey {
-                legal: bits,
-                lower,
-                upper,
-                required,
-            });
-        if key.is_some()
-            && let Some(i) = self.slots.iter().position(|s| s.key == key)
-        {
-            self.slots[i].used = self.generation;
-            return i;
+        let key = legal_bits.map(|bits| ComboKey {
+            legal: bits,
+            lower,
+            upper,
+            required,
+        });
+        if key.is_some() {
+            // The slot found last is the likeliest (PlayHand and Discard ask for the same).
+            let hit = if self.slots.get(self.last).is_some_and(|s| s.key == key) {
+                Some(self.last)
+            } else {
+                self.slots.iter().position(|s| s.key == key)
+            };
+            if let Some(i) = hit {
+                self.slots[i].used = self.generation;
+                self.last = i;
+                return i;
+            }
         }
         let free = (0..self.slots.len())
             .map(|j| (self.next + j) % self.slots.len())
@@ -223,6 +231,7 @@ impl ComboCache {
         s.used = self.generation;
         s.selections.clear();
         combinations_into(legal, lower, upper, required, &mut s.selections);
+        self.last = slot;
         slot
     }
 }
@@ -289,6 +298,8 @@ pub struct ActionTable {
     len: usize,
     bits: Vec<u64>,
     legal_cards: Vec<usize>,
+    /// `legal_cards` as bits by hand index, `None` with an index of 128 or more.
+    legal_bits: Option<u128>,
     combos: ComboCache,
     picked: Vec<u64>,
     chosen: Vec<usize>,
@@ -427,6 +438,10 @@ impl ActionTable {
                 .filter(|(_, b)| **b)
                 .map(|(i, _)| i),
         );
+        self.legal_bits = self
+            .legal_cards
+            .iter()
+            .try_fold(0u128, |acc, &i| (i < 128).then(|| acc | (1u128 << i)));
         for (i, &allowed) in type_mask.iter().enumerate() {
             let Some(t) = ActionType::from_index(i) else {
                 continue;
@@ -499,7 +514,9 @@ impl ActionTable {
         let n = self.legal_cards.len();
         let upper = n.min(max_select);
         let lower = min_select.min(upper);
-        let slot = self.combos.slot(&self.legal_cards, lower, upper, required);
+        let slot = self
+            .combos
+            .slot(&self.legal_cards, self.legal_bits, lower, upper, required);
         let count = self.combos.slots[slot].selections.len();
         let entity_target = entity.map(|e| e as u32);
         if count <= CARD_COMBO_BUDGET {
