@@ -11,6 +11,12 @@ while it is 0.x, a minor release (0.2 → 0.3) can break things, and a patch rel
   that had taken part in a step polled for twice as long first.
 - `BalatroVectorEnv(num_threads=0)` honours `RAYON_NUM_THREADS` again, as it did up to 0.2.2
   (on a rayon pool); unset, it is one thread per core.
+- With several `back_keys` or `stakes`, `reset(seed=s)` starts the same run every time, in
+  `BalatroEnvironment`, `BalatroGymnasiumEnv` and `BalatroVectorEnv`: the back and the stake are
+  drawn from the episode's seed instead of Python's global `random`, which nothing seeded. The
+  unseeded episodes (`f"{seed_prefix}_{n}"`) start the same runs in every process too. So a seed
+  can now start a different back or stake than it did before; with one back and one stake (the
+  default) nothing changes.
 
 ## [0.2.3] - 2026-11-03
 

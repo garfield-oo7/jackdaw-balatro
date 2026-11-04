@@ -5,8 +5,8 @@ action table, built-in rewards and how episodes start.
 
 from __future__ import annotations
 
+import hashlib
 import math
-import random
 from collections.abc import Iterator, Sequence
 from typing import Any, overload
 
@@ -147,10 +147,24 @@ def rust_reward(fn: Any) -> tuple[str, tuple[float, ...] | None] | None:
     return None
 
 
+def episode_start(
+    run_seed: str, back_keys: Sequence[str], stakes: Sequence[int]
+) -> tuple[str, int]:
+    """The back and the stake of the episode played on ``run_seed``: with several of either,
+    drawn from a SHA-256 of the seed (bytes 0-7 pick the back, 8-15 the stake), so a seed
+    starts the same run every time, whatever else draws random numbers."""
+    if len(back_keys) == 1 and len(stakes) == 1:
+        return back_keys[0], stakes[0]
+    digest = hashlib.sha256(b"jackdaw/episode-start/" + run_seed.encode()).digest()
+    back = back_keys[int.from_bytes(digest[:8], "little") % len(back_keys)]
+    stake = stakes[int.from_bytes(digest[8:16], "little") % len(stakes)]
+    return back, stake
+
+
 class EpisodeStarts:
     """How :class:`~jackdaw.env.balatro_env.BalatroEnvironment` starts each episode: the seed
     (given, else ``f"{seed_prefix}_{n}"`` for the n-th episode), then a back and a stake drawn
-    with :func:`random.choice` when there are several."""
+    from it (:func:`episode_start`) when there are several."""
 
     __slots__ = ("back_keys", "stakes", "seed_prefix", "episode_count")
 
@@ -166,8 +180,7 @@ class EpisodeStarts:
         """``(back, stake, run_seed)`` for the next episode."""
         run_seed = seed if seed is not None else f"{self.seed_prefix}_{self.episode_count}"
         self.episode_count += 1
-        back = random.choice(self.back_keys) if len(self.back_keys) > 1 else self.back_keys[0]
-        stake = random.choice(self.stakes) if len(self.stakes) > 1 else self.stakes[0]
+        back, stake = episode_start(run_seed, self.back_keys, self.stakes)
         return back, stake, run_seed
 
 

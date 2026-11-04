@@ -148,8 +148,8 @@ The swaps and sorts (types 15-20, `FREE_ACTION_TYPES`) cost nothing in the game,
 ```python
 env = BalatroEnvironment(
     adapter_factory=DirectAdapter,
-    back_keys=["b_red"],       # deck backs to sample from on reset
-    stakes=[1],                # stakes to sample from on reset
+    back_keys=["b_red"],       # deck backs to pick from on reset
+    stakes=[1],                # stakes to pick from on reset
     max_steps=10_000,          # steps before truncation
     seed_prefix="TRAIN",       # prefix for deterministic seed generation
     end_on_win=True,           # end the episode when ante 8 is beaten
@@ -157,6 +157,8 @@ env = BalatroEnvironment(
     on_refusal="truncate",     # an action the engine refuses: "truncate" or "raise"
 )
 ```
+
+With several `back_keys` or `stakes`, each episode's back and stake are drawn from its seed (the `seed` given to `reset`, else `f"{seed_prefix}_{n}"` for the n-th episode), so a seed always starts the same run, whatever else uses Python's `random`.
 
 With `end_on_win=True` (the default) a won run ends the episode, as vanilla stops at its win screen. Pass `end_on_win=False` to keep playing into endless mode until the run is lost or truncated.
 

@@ -7,7 +7,6 @@ the bridge between the Balatro engine and the generic RL training loop.
 
 from __future__ import annotations
 
-import random
 from collections.abc import Callable
 from typing import Any
 
@@ -31,6 +30,7 @@ from jackdaw.env.game_spec import GameActionMask, GameObservation, GameSpec
 from jackdaw.env.observation import Observation
 from jackdaw.env.rust_env import action_mask_from_parts
 from jackdaw.env.rust_env import factored_to_engine_action as rust_factored_to_engine
+from jackdaw.env.rust_gym import episode_start
 from jackdaw.env.rust_observation import observation_from_buffer
 
 
@@ -81,9 +81,11 @@ class BalatroEnvironment:
         Callable that creates a fresh :class:`GameAdapter` instance (one with a
         ``game``).
     back_keys:
-        List of deck back keys to sample from on each reset.
+        Deck back keys to pick from on each reset.
     stakes:
-        List of stakes to sample from on each reset.
+        Stakes to pick from on each reset.  With several backs or stakes, each episode's are
+        drawn from its seed (:func:`~jackdaw.env.rust_gym.episode_start`), so a seed always
+        starts the same run.
     max_steps:
         Maximum steps before truncation.
     seed_prefix:
@@ -162,10 +164,7 @@ class BalatroEnvironment:
         self.episode_ante = 1
 
         self._adapter = self._adapter_factory()
-        back_key = (
-            random.choice(self._back_keys) if len(self._back_keys) > 1 else self._back_keys[0]
-        )
-        stake = random.choice(self._stakes) if len(self._stakes) > 1 else self._stakes[0]
+        back_key, stake = episode_start(seed, self._back_keys, self._stakes)
         self._adapter.reset(back_key, stake, seed)
 
         game = getattr(self._adapter, "game", None)
