@@ -139,19 +139,10 @@ impl std::ops::Deref for EvalCards {
 }
 
 /// Positions in the evaluated hand (0-based).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Group {
     idx: [u8; GROUP_CAP],
     len: u8,
-}
-
-impl Default for Group {
-    fn default() -> Self {
-        Self {
-            idx: [0; GROUP_CAP],
-            len: 0,
-        }
-    }
 }
 
 impl Group {
@@ -271,16 +262,16 @@ fn get_x_same_all(hand: &[EvalCard]) -> [Groups; 4] {
         }
     }
     // Lua keeps, per id, the group built from the first card of that id: its positions in order.
+    // Each num's groups come by id, highest first.
     let mut ret = [Groups::default(); 4];
-    for (slot, num) in ret.iter_mut().zip(2..=5) {
-        for id in (1..=14).rev() {
-            if count[id] == num {
-                let mut g = Group::default();
-                for &i in &at[id][..num] {
-                    g.push(usize::from(i));
-                }
-                slot.push(g);
+    for id in (1..=14).rev() {
+        let num = count[id];
+        if (2..=5).contains(&num) {
+            let mut g = Group::default();
+            for &i in &at[id][..num] {
+                g.push(usize::from(i));
             }
+            ret[num - 2].push(g);
         }
     }
     ret
