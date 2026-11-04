@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from gymnasium.vector import AutoresetMode
 
+from jackdaw import _core
 from jackdaw.core import IllegalActionError
 from jackdaw.env import (
     ACTION_VERSION,
@@ -225,6 +226,132 @@ def test_same_step_autoreset_is_the_gym_env() -> None:
         else:
             assert "final_obs" not in v_info
     assert episodes >= 5
+
+
+def _two_call_same_step(vec: BalatroVectorEnv) -> BalatroVectorEnv:
+    """``vec`` with its same-step autoreset as a ``reset_some`` after each step, as with
+    several backs or stakes."""
+    vec._core.set_autoreset(None)
+    vec._episode_counts = None
+    return vec
+
+
+def _same_step_run(fused: bool, threads: int) -> list[Any]:
+    vec = BalatroVectorEnv(
+        6,
+        seed_prefix="FOLD",
+        max_steps=30,
+        reward_shaping=True,
+        num_threads=threads,
+        copy=False,
+        autoreset_mode=AutoresetMode.SAME_STEP,
+    )
+    assert vec._episode_counts is not None
+    if not fused:
+        _two_call_same_step(vec)
+    rng = np.random.default_rng(4)
+    seen: list[Any] = []
+
+    def keep(result: tuple[Any, ...]) -> None:
+        obs, *rest, info = result
+        seen.append(({k: v.copy() for k, v in obs.items()}, [np.copy(r) for r in rest]))
+        seen.append(
+            {
+                k: [None if x is None else {n: a.copy() for n, a in x.items()} for x in v]
+                if k == "final_obs"
+                else (v.copy() if isinstance(v, np.ndarray) else v)
+                for k, v in info.items()
+            }
+        )
+
+    result: tuple[Any, ...] = vec.reset(seed=5)
+    keep(result)
+    for pos in range(240):
+        actions = [int(rng.choice(np.flatnonzero(m))) for m in result[-1]["action_mask"]]
+        result = vec.step(actions)
+        keep(result)
+        if pos == 80:
+            mask = [False, True, True, False, False, True]
+            result = vec.reset(seed=[None, 3, None, None, None, None], options={"reset_mask": mask})
+            keep(result)
+        if pos == 160:
+            result = vec.reset()
+            keep(result)
+    counts = vec._episode_counts
+    seen.append([s.episode_count for s in vec._starts] if counts is None else counts.tolist())
+    seen.append([vec.state(i) for i in range(6)])
+    return seen
+
+
+def _same(a: Any, b: Any) -> bool:
+    if isinstance(a, np.ndarray):
+        return isinstance(b, np.ndarray) and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    if isinstance(a, dict):
+        return isinstance(b, dict) and list(a) == list(b) and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, list | tuple):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b, strict=True))
+    return bool(a == b)
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_a_same_step_autoreset_in_one_call_is_a_step_then_a_reset(threads: int) -> None:
+    """With one back and one stake the step that ends an episode starts the next in the same
+    call to ``_core``: the same observations, masks, rewards, final observations and infos as
+    a ``reset_some`` after the step, partial and full resets in between."""
+    two_calls = _same_step_run(False, threads)
+    fused = _same_step_run(True, threads)
+    assert sum("final_obs" in x for x in two_calls if isinstance(x, dict)) >= 10
+    assert _same(fused, two_calls)
+
+
+def test_several_backs_reset_after_the_step() -> None:
+    vec = BalatroVectorEnv(2, back_keys=["b_red", "b_blue"], autoreset_mode=AutoresetMode.SAME_STEP)
+    assert vec._episode_counts is None
+    assert BalatroVectorEnv(2, autoreset_mode=AutoresetMode.NEXT_STEP)._episode_counts is None
+
+
+def test_the_fused_autoreset_checks_its_arguments() -> None:
+    n = 2
+    core = _core.VectorEnv([("b_red", 1, "ARG", None, i) for i in range(n)], 50, True, "sparse")
+    obs = np.zeros((n, _core.GYM_OBS_LEN), np.float32)
+    masks = np.zeros((n, _core.MAX_ACTIONS), np.uint8)
+    record = np.zeros(n * 30, np.uint8)
+    final = np.zeros((n, _core.GYM_OBS_LEN), np.float32)
+    counts = np.zeros(n, np.uint64)
+    actions = np.zeros(n, np.int64)
+    core.reset([("b_red", 1, f"ARG{i}", None, None) for i in range(n)], obs, masks)
+    before = [core.state(i) for i in range(n)]
+    with pytest.raises(ValueError, match="set_autoreset"):
+        core.step(actions, [], obs, masks, record, final_obs=final, episode_counts=counts)
+    with pytest.raises(ValueError, match="together"):
+        core.step(actions, [], obs, masks, record, final_obs=final)
+    with pytest.raises(ValueError, match="one start per env"):
+        core.set_autoreset([("b_red", 1, "ARG", None)])
+    with pytest.raises(ValueError, match="unknown back"):
+        core.set_autoreset([("b_nope", 1, "ARG", None)] * n)
+    core.set_autoreset([("b_red", 1, "ARG", None)] * n)
+    with pytest.raises(ValueError, match="overlap"):
+        core.step(actions, [], obs, masks, record, final_obs=obs, episode_counts=counts)
+    with pytest.raises(ValueError, match="episode_counts"):
+        core.step(actions, [], obs, masks, record, final_obs=final, episode_counts=counts[:1])
+    counts[1] = np.iinfo(np.uint64).max
+    with pytest.raises(IndexError, match="episode count"):
+        core.step(actions, [], obs, masks, record, final_obs=final, episode_counts=counts)
+    assert [core.state(i) for i in range(n)] == before
+
+
+def test_a_resetting_env_ignores_its_action() -> None:
+    """NEXT_STEP: the step after an episode end resets that sub-env whatever its action, a
+    negative one included."""
+    vec = BalatroVectorEnv(2, seed_prefix="NEG", max_steps=3)
+    vec.reset(seed=1)
+    for _ in range(3):
+        _, _, terminated, truncated, info = vec.step([0, 0])
+    assert truncated.all()
+    obs, rewards, _, _, info = vec.step([-1, -(2**40)])
+    assert not rewards.any() and info["action_mask"].any(axis=1).all()
+    with pytest.raises(IndexError):
+        vec.step([-1, 0])
 
 
 def test_a_partial_reset() -> None:

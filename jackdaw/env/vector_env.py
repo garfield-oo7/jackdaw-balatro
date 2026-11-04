@@ -121,7 +121,10 @@ class BalatroVectorEnv(VectorEnv):
         Return copies of the observation arrays (default), or views of the buffers the
         next step overwrites.
     autoreset_mode:
-        ``AutoresetMode.NEXT_STEP`` (default) or ``AutoresetMode.SAME_STEP``.
+        ``AutoresetMode.NEXT_STEP`` (default) or ``AutoresetMode.SAME_STEP``.  With one back
+        and one stake, ``SAME_STEP`` resets the ended sub-envs in the same call to the engine
+        as the step; with several (drawn with :func:`random.choice`), in a second call after
+        it.
     max_free_moves:
         As for the Gym env: after this many free moves in a row (swaps, sorts) a sub-env's
         table holds none until another action.  ``None``: no cap.
@@ -208,6 +211,19 @@ class BalatroVectorEnv(VectorEnv):
         # Sub-envs whose episode ended on the last step: the next step resets them.
         self._pending: list[int] = []
         self._reset_once = False
+        # SAME_STEP with one back and one stake: the step that ends an episode starts the next
+        # in the same call to _core (on f"{seed_prefix}_{count}"), the last observations going
+        # to _final_obs.  The episode counts live in _episode_counts then, which _core advances.
+        # Several backs or stakes are drawn with random.choice here, after the step.
+        self._episode_counts: np.ndarray | None = None
+        if autoreset_mode is AutoresetMode.SAME_STEP and all(
+            len(s.back_keys) == 1 and len(s.stakes) == 1 for s in self._starts
+        ):
+            self._core.set_autoreset(
+                [(s.back_keys[0], s.stakes[0], s.seed_prefix, None) for s in self._starts]
+            )
+            self._episode_counts = np.zeros(num_envs, dtype=np.uint64)
+            self._final_obs = np.zeros((num_envs, OBS_LEN), dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -265,9 +281,21 @@ class BalatroVectorEnv(VectorEnv):
         obs, masks = self._outputs()
         # A fresh record each step: the arrays viewing it are the caller's to keep.
         record = np.empty(self.num_envs * _RECORD, dtype=np.uint8)
-        ended_envs, not_ported, refused = self._core.step(
-            actions, resets, obs, masks.view(np.uint8), record
-        )
+        counts = self._episode_counts
+        if counts is None:
+            ended_envs, not_ported, refused = self._core.step(
+                actions, resets, obs, masks.view(np.uint8), record
+            )
+        else:
+            ended_envs, not_ported, refused = self._core.step(
+                actions,
+                resets,
+                obs,
+                masks.view(np.uint8),
+                record,
+                final_obs=self._final_obs,
+                episode_counts=counts,
+            )
         field = self._field
         rewards = field(record, "reward")
         terminated = field(record, "terminated")
@@ -277,7 +305,7 @@ class BalatroVectorEnv(VectorEnv):
             ended = field(record, "ended")
             episode = self._episode_info(record, ended, not_ported, refused)
             if self.autoreset_mode is AutoresetMode.SAME_STEP:
-                final = batched_gym_obs(obs[ended_envs])
+                final = batched_gym_obs((obs if counts is None else self._final_obs)[ended_envs])
                 final_obs = np.full(self.num_envs, None, dtype=object)
                 for row, i in enumerate(ended_envs):
                     final_obs[i] = {key: value[row] for key, value in final.items()}
@@ -285,8 +313,9 @@ class BalatroVectorEnv(VectorEnv):
                 info["_final_obs"] = ended
                 info["final_info"] = episode
                 info["_final_info"] = ended
-                resets = [(i, self._reset_tuple(i, None)) for i in ended_envs]
-                self._core.reset_some(resets, obs, masks.view(np.uint8))
+                if counts is None:
+                    resets = [(i, self._reset_tuple(i, None)) for i in ended_envs]
+                    self._core.reset_some(resets, obs, masks.view(np.uint8))
                 self._pending = []
             else:
                 info.update(episode)
@@ -332,7 +361,13 @@ class BalatroVectorEnv(VectorEnv):
     # ------------------------------------------------------------------
 
     def _reset_tuple(self, i: int, seed: int | None) -> tuple[Any, ...]:
-        back, stake, run_seed = self._starts[i].next(None if seed is None else str(seed))
+        starts = self._starts[i]
+        counts = self._episode_counts
+        if counts is not None:
+            starts.episode_count = int(counts[i])
+        back, stake, run_seed = starts.next(None if seed is None else str(seed))
+        if counts is not None:
+            counts[i] = starts.episode_count
         rng_seed = None if seed is None else sampler_seed(seed)
         return (back, stake, run_seed, None, rng_seed)
 

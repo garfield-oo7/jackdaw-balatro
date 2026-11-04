@@ -6,7 +6,7 @@ use jackdaw_core::run::RunSpec;
 use jackdaw_env::env::{EnvConfig, GYM_OBS_LEN, GymEnv as CoreGymEnv, StepError, StepResult};
 use jackdaw_env::gym::MAX_ACTIONS;
 use jackdaw_env::reward::{Reward, ShapedWeights, StateSummary};
-use jackdaw_env::vector::{EnvOut, ResetSpec, VectorEnv as CoreVectorEnv};
+use jackdaw_env::vector::{AutoReset, EnvOut, ResetSpec, VectorEnv as CoreVectorEnv};
 use pyo3::buffer::{Element, PyBuffer};
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
@@ -151,6 +151,9 @@ fn obs_bytes<'py>(
         Ok(())
     })
 }
+
+/// An env's next runs for same-step autoreset: `(back, stake, seed_prefix, challenge)`.
+type StartTuple = (String, u8, String, Option<String>);
 
 /// A run's start for a reset: `(back, stake, seed, challenge, rng_seed)`.
 type ResetTuple = (String, u8, String, Option<String>, Option<u64>);
@@ -495,6 +498,9 @@ fn writable<'a, T: Element>(
 pub struct VectorEnv {
     inner: CoreVectorEnv,
     out: Vec<EnvOut>,
+    /// Each env's next run for same-step autoreset, its seed holding the seed prefix
+    /// (`set_autoreset`).
+    starts: Option<Vec<RunSpec>>,
 }
 
 /// Bytes per env of a step's record.
@@ -573,6 +579,7 @@ impl VectorEnv {
         Ok(VectorEnv {
             inner,
             out: vec![EnvOut::default(); n],
+            starts: None,
         })
     }
 
@@ -627,14 +634,48 @@ impl VectorEnv {
             .map_err(value_error)
     }
 
+    /// Set how ``step`` starts the next run of an env whose episode it ends when given
+    /// ``final_obs`` and ``episode_counts``: one ``(back, stake, seed_prefix, challenge)`` per
+    /// env, the run starting on the seed ``f"{seed_prefix}_{count}"``. ``None`` clears it.
+    fn set_autoreset(&mut self, starts: Option<Vec<StartTuple>>) -> PyResult<()> {
+        self.starts = match starts {
+            None => None,
+            Some(starts) => {
+                if starts.len() != self.inner.len() {
+                    return Err(value_error("one start per env"));
+                }
+                Some(
+                    starts
+                        .iter()
+                        .map(|(back, stake, prefix, challenge)| {
+                            run_spec(back, *stake, prefix, challenge.as_deref())
+                        })
+                        .collect::<PyResult<_>>()?,
+                )
+            }
+        };
+        Ok(())
+    }
+
     /// Step every env: the envs listed in ``resets`` as ``(env, reset tuple)`` start their next
-    /// run instead (their results are zero), every other takes its action from ``actions``
-    /// (int64, an index into its table). Writes the observations, action masks and the
-    /// results' record (``num_envs x 30`` bytes: reward f64, ante_reached i64, rounds_beaten
-    /// i64, then terminated, truncated, episode_end, won, not_ported and refused as bytes; one
-    /// ``num_envs`` array per field, in that order). Returns ``(ended, not_ported, refused)``:
-    /// the envs whose episode ended, and whether any was cut as not ported or refused.
-    /// Raises ``IndexError`` without stepping anything when an action is past its env's table.
+    /// run instead (their results are zero; their action is ignored), every other takes its
+    /// action from ``actions`` (int64, an index into its table). Writes the observations,
+    /// action masks and the results' record (``num_envs x 30`` bytes: reward f64,
+    /// ante_reached i64, rounds_beaten i64, then terminated, truncated, episode_end, won,
+    /// not_ported and refused as bytes; one ``num_envs`` array per field, in that order).
+    /// Returns ``(ended, not_ported, refused)``: the envs whose episode ended, and whether any
+    /// was cut as not ported or refused. Raises ``IndexError`` without stepping anything when
+    /// an action is past its env's table.
+    ///
+    /// With ``final_obs`` (``num_envs x 614`` float32) and ``episode_counts`` (``num_envs``
+    /// uint64), and the starts ``set_autoreset`` set, an env whose episode the step ends starts
+    /// its next run in the same step (same-step autoreset): its last observation goes to its
+    /// row of ``final_obs``, its ``obs`` and ``masks`` rows hold the new run's, and its count
+    /// goes up by one after its seed ``f"{seed_prefix}_{count}"`` is taken; the sampler isn't
+    /// reseeded. ``final_obs``'s other rows are left as they are. This is ``reset_some`` on
+    /// the ended envs right after the step, in one call.
+    #[pyo3(signature = (actions, resets, obs, masks, record, *, final_obs=None, episode_counts=None))]
+    #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
         py: Python<'_>,
@@ -643,16 +684,10 @@ impl VectorEnv {
         mut obs: PyBuffer<f32>,
         mut masks: PyBuffer<u8>,
         mut record: PyBuffer<u8>,
+        final_obs: Option<PyBuffer<f32>>,
+        episode_counts: Option<PyBuffer<u64>>,
     ) -> PyResult<(Vec<usize>, bool, bool)> {
         let n = self.inner.len();
-        let actions: Vec<usize> = actions
-            .to_vec(py)?
-            .into_iter()
-            .map(|a| usize::try_from(a).map_err(|_| PyIndexError::new_err(format!("action {a}"))))
-            .collect::<PyResult<_>>()?;
-        if actions.len() != n {
-            return Err(value_error("one action per env"));
-        }
         let mut specs: Vec<Option<ResetSpec>> = vec![None; n];
         for (i, t) in &resets {
             let slot = specs
@@ -660,13 +695,50 @@ impl VectorEnv {
                 .ok_or_else(|| PyIndexError::new_err(format!("no env {i}")))?;
             *slot = Some(reset_spec(t)?);
         }
-        disjoint(&[span(&obs), span(&masks), span(&record)])?;
+        let actions = actions.to_vec(py)?;
+        if actions.len() != n {
+            return Err(value_error("one action per env"));
+        }
+        // An env that resets ignores its action, whatever it is.
+        let actions: Vec<usize> = actions
+            .into_iter()
+            .zip(&specs)
+            .map(|(a, spec)| match spec {
+                Some(_) => Ok(0),
+                None => {
+                    usize::try_from(a).map_err(|_| PyIndexError::new_err(format!("action {a}")))
+                }
+            })
+            .collect::<PyResult<_>>()?;
+        let (mut final_obs, mut counts) = match (final_obs, episode_counts) {
+            (None, None) => (None, None),
+            (Some(f), Some(c)) => (Some(f), Some(c)),
+            _ => return Err(value_error("final_obs and episode_counts go together")),
+        };
+        let mut spans = vec![span(&obs), span(&masks), span(&record)];
+        spans.extend(final_obs.as_ref().map(span));
+        spans.extend(counts.as_ref().map(span));
+        disjoint(&spans)?;
         let obs = writable(&mut obs, n * GYM_OBS_LEN, "obs")?;
         let masks = writable(&mut masks, n * MAX_ACTIONS, "masks")?;
         let record = writable(&mut record, n * RECORD, "record")?;
-        let VectorEnv { inner, out } = self;
+        let auto = match (&mut final_obs, &mut counts) {
+            (Some(f), Some(c)) => Some(AutoReset {
+                starts: self
+                    .starts
+                    .as_deref()
+                    .ok_or_else(|| value_error("same-step autoreset needs set_autoreset first"))?,
+                final_obs: writable(f, n * GYM_OBS_LEN, "final_obs")?,
+                counts: writable(c, n, "episode_counts")?,
+            }),
+            _ => None,
+        };
+        let VectorEnv { inner, out, .. } = self;
         py.detach(|| -> Result<_, String> {
-            inner.step(&actions, &specs, obs, masks, out)?;
+            match auto {
+                Some(auto) => inner.step_autoreset(&actions, &specs, auto, obs, masks, out)?,
+                None => inner.step(&actions, &specs, obs, masks, out)?,
+            }
             Ok(write_record(out, record))
         })
         .map_err(PyIndexError::new_err)

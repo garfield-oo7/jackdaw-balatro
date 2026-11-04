@@ -1,5 +1,6 @@
 //! A batch of Gym environments stepped in parallel (`BalatroVectorEnv`), with next-step
-//! autoreset: an env whose episode ended is reset by the following step instead of stepped.
+//! autoreset (an env whose episode ended is reset by the following step instead of stepped) or
+//! same-step autoreset (the step that ends an episode starts the next, `step_autoreset`).
 //!
 //! Each env owns its run, buffers and sampler, and writes only its own slice of the outputs, so
 //! the results don't depend on how many threads step them.
@@ -175,16 +176,7 @@ impl VectorEnv {
         masks: &mut [u8],
         out: &mut [EnvOut],
     ) -> Result<(), String> {
-        assert_eq!(actions.len(), self.envs.len());
-        assert_eq!(resets.len(), self.envs.len());
-        for (i, ((env, &a), reset)) in self.envs.iter().zip(actions).zip(resets).enumerate() {
-            if reset.is_none() && a >= env.table().len() {
-                return Err(format!(
-                    "env {i}: action {a} is not in its action table ({} actions)",
-                    env.table().len()
-                ));
-            }
-        }
+        self.check_actions(actions, resets)?;
         let items = self
             .envs
             .iter_mut()
@@ -210,6 +202,102 @@ impl VectorEnv {
             },
         )
     }
+
+    /// [`step`](Self::step) with same-step autoreset: an env whose episode the step ends writes
+    /// its last observation to its row of `auto.final_obs` and starts its next run, as
+    /// [`reset_some`](Self::reset_some) would start it right after the step: on its
+    /// `auto.starts` spec with the seed `"{prefix}_{count}"`, `prefix` being that spec's seed
+    /// and `count` its entry of `auto.counts`, which goes up by one; the sampler isn't
+    /// reseeded. Its `obs` and `masks` rows hold the new run's, and its output the step's.
+    /// The other rows of `auto.final_obs` are left as they are. Fails without stepping
+    /// anything when an action is out of its table or a count would overflow.
+    pub fn step_autoreset(
+        &mut self,
+        actions: &[usize],
+        resets: &[Option<ResetSpec>],
+        auto: AutoReset<'_>,
+        obs: &mut [f32],
+        masks: &mut [u8],
+        out: &mut [EnvOut],
+    ) -> Result<(), String> {
+        let n = self.envs.len();
+        let AutoReset {
+            starts,
+            counts,
+            final_obs,
+        } = auto;
+        assert_eq!(starts.len(), n);
+        assert_eq!(counts.len(), n);
+        assert_eq!(final_obs.len(), n * GYM_OBS_LEN);
+        self.check_actions(actions, resets)?;
+        if let Some(i) = (0..n).find(|&i| resets[i].is_none() && counts[i] == u64::MAX) {
+            return Err(format!("env {i}: its episode count is at its maximum"));
+        }
+        let items = self
+            .envs
+            .iter_mut()
+            .zip(actions)
+            .zip(resets)
+            .zip(obs.chunks_mut(GYM_OBS_LEN))
+            .zip(masks.chunks_mut(MAX_ACTIONS))
+            .zip(out.iter_mut())
+            .zip(starts.iter().zip(counts.iter_mut()))
+            .zip(final_obs.chunks_mut(GYM_OBS_LEN));
+        for_each_home(
+            &mut self.pool,
+            items,
+            |(((((((env, &a), reset), o), m), r), (start, count)), final_obs)| {
+                *r = match reset {
+                    Some(reset) => {
+                        env.reset(&reset.spec, reset.rng_seed)?;
+                        EnvOut::default()
+                    }
+                    None => {
+                        let r = step_one(env, a);
+                        if r.episode_end {
+                            env.write_obs(final_obs);
+                            let spec = RunSpec {
+                                back: start.back,
+                                stake: start.stake,
+                                seed: format!("{}_{}", start.seed, *count),
+                                challenge: start.challenge,
+                            };
+                            *count += 1;
+                            env.reset(&spec, None)?;
+                        }
+                        r
+                    }
+                };
+                env.write_obs(o);
+                env.write_action_mask(m);
+                Ok(())
+            },
+        )
+    }
+
+    /// Fail unless every env that doesn't reset has an action in its table.
+    fn check_actions(&self, actions: &[usize], resets: &[Option<ResetSpec>]) -> Result<(), String> {
+        assert_eq!(actions.len(), self.envs.len());
+        assert_eq!(resets.len(), self.envs.len());
+        for (i, ((env, &a), reset)) in self.envs.iter().zip(actions).zip(resets).enumerate() {
+            if reset.is_none() && a >= env.table().len() {
+                return Err(format!(
+                    "env {i}: action {a} is not in its action table ({} actions)",
+                    env.table().len()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Same-step autoreset for [`VectorEnv::step_autoreset`]: per env, the run its next episode
+/// starts (`seed` holding the seed prefix), the count of episodes it has started (the next
+/// one's seed suffix) and a row for its last observation.
+pub struct AutoReset<'a> {
+    pub starts: &'a [RunSpec],
+    pub counts: &'a mut [u64],
+    pub final_obs: &'a mut [f32],
 }
 
 /// A counter on a cache line of its own.
@@ -358,6 +446,109 @@ mod tests {
                 .zip(&four.0)
                 .all(|(a, b)| a.to_bits() == b.to_bits())
         );
+    }
+
+    /// Every observation, mask, output and last observation of a run, and its episode counts.
+    type SameStepRun = (Vec<f32>, Vec<u8>, Vec<EnvOut>, Vec<f32>, Vec<u64>);
+
+    /// Run `n` envs on `threads` threads with same-step autoreset for `steps` steps, the
+    /// autoreset folded into the step (`fused`) or as a `reset_some` after it; return every
+    /// observation, mask, output and last observation, and the episode counts.
+    fn run_same_step(n: usize, threads: usize, steps: usize, fused: bool) -> SameStepRun {
+        let resets: Vec<ResetSpec> = (0..n)
+            .map(|i| reset(&format!("SAME{i}_0"), i as u64))
+            .collect();
+        let starts: Vec<RunSpec> = (0..n).map(|i| reset(&format!("SAME{i}"), 0).spec).collect();
+        let mut counts = vec![1u64; n];
+        let config = EnvConfig {
+            max_steps: 40,
+            ..EnvConfig::default()
+        };
+        let mut v = VectorEnv::new(&resets, config, threads).unwrap();
+        let mut obs = vec![0f32; n * GYM_OBS_LEN];
+        let mut masks = vec![0u8; n * MAX_ACTIONS];
+        let mut final_obs = vec![0f32; n * GYM_OBS_LEN];
+        let mut out = vec![EnvOut::default(); n];
+        v.reset(&resets, &mut obs, &mut masks).unwrap();
+        let mut policy = Xoshiro256::seed_from_u64(7);
+        let none: Vec<Option<ResetSpec>> = vec![None; n];
+        let (mut all_obs, mut all_masks, mut all_out, mut all_final) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..steps {
+            let actions: Vec<usize> = (0..n)
+                .map(|i| policy.below(v.envs()[i].table().len() as u64) as usize)
+                .collect();
+            if fused {
+                let auto = AutoReset {
+                    starts: &starts,
+                    counts: &mut counts,
+                    final_obs: &mut final_obs,
+                };
+                v.step_autoreset(&actions, &none, auto, &mut obs, &mut masks, &mut out)
+                    .unwrap();
+            } else {
+                v.step(&actions, &none, &mut obs, &mut masks, &mut out)
+                    .unwrap();
+                let ended: Vec<usize> = (0..n).filter(|&i| out[i].episode_end).collect();
+                for &i in &ended {
+                    final_obs[i * GYM_OBS_LEN..(i + 1) * GYM_OBS_LEN]
+                        .copy_from_slice(&obs[i * GYM_OBS_LEN..(i + 1) * GYM_OBS_LEN]);
+                }
+                let specs: Vec<ResetSpec> = ended
+                    .iter()
+                    .map(|&i| {
+                        counts[i] += 1;
+                        ResetSpec {
+                            rng_seed: None,
+                            ..reset(&format!("SAME{i}_{}", counts[i] - 1), 0)
+                        }
+                    })
+                    .collect();
+                v.reset_some(&ended, &specs, &mut obs, &mut masks).unwrap();
+            }
+            all_obs.extend_from_slice(&obs);
+            all_masks.extend_from_slice(&masks);
+            all_out.extend_from_slice(&out);
+            all_final.extend_from_slice(&final_obs);
+        }
+        (all_obs, all_masks, all_out, all_final, counts)
+    }
+
+    #[test]
+    fn a_fused_autoreset_is_a_step_then_a_reset() {
+        let two_calls = run_same_step(6, 1, 300, false);
+        assert!(two_calls.4.iter().all(|&c| c > 3), "{:?}", two_calls.4);
+        for threads in [1, 4] {
+            let fused = run_same_step(6, threads, 300, true);
+            assert_eq!(fused.1, two_calls.1);
+            assert_eq!(fused.2, two_calls.2);
+            assert_eq!(fused.4, two_calls.4);
+            for (a, b) in [(&fused.0, &two_calls.0), (&fused.3, &two_calls.3)] {
+                assert!(a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_full_episode_count_steps_nothing() {
+        let resets = vec![reset("FULL0", 0), reset("FULL1", 1)];
+        let starts: Vec<RunSpec> = resets.iter().map(|r| r.spec.clone()).collect();
+        let mut v = VectorEnv::new(&resets, EnvConfig::default(), 2).unwrap();
+        let mut obs = vec![0f32; 2 * GYM_OBS_LEN];
+        let mut masks = vec![0u8; 2 * MAX_ACTIONS];
+        let mut final_obs = vec![0f32; 2 * GYM_OBS_LEN];
+        let mut out = vec![EnvOut::default(); 2];
+        let mut counts = vec![0, u64::MAX];
+        let before: Vec<_> = v.envs().iter().map(|e| e.game().snapshot()).collect();
+        let auto = AutoReset {
+            starts: &starts,
+            counts: &mut counts,
+            final_obs: &mut final_obs,
+        };
+        let err = v.step_autoreset(&[0, 0], &[None, None], auto, &mut obs, &mut masks, &mut out);
+        assert!(err.is_err());
+        let after: Vec<_> = v.envs().iter().map(|e| e.game().snapshot()).collect();
+        assert_eq!(before, after);
     }
 
     #[test]

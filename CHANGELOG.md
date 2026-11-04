@@ -5,7 +5,17 @@ while it is 0.x, a minor release (0.2 → 0.3) can break things, and a patch rel
 
 ## Unreleased
 
+### Changed
+
+- `BalatroVectorEnv(autoreset_mode=SAME_STEP)` resets the envs whose episode a step ends in
+  the same call to the engine as the step, when every sub-env has one back and one stake (the
+  default): one pass over the thread pool per step instead of two. It returns the same
+  observations, masks, final observations and infos.
+
 ### Fixed
+
+- `BalatroVectorEnv`: a sub-env that resets on a step ignores its action, as documented, a
+  negative one included (it raised `IndexError`).
 
 - `BalatroVectorEnv`'s idle threads sleep after polling for 100 µs, as documented: a thread
   that had taken part in a step polled for twice as long first.
