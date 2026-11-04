@@ -917,19 +917,19 @@ impl Areas {
     ) -> Ids {
         debug_assert_ne!(from, to);
         let mut src = std::mem::take(&mut self.lists[from as usize]);
-        let n = src.len();
-        // The positions in `from` of the cards that move, in the order they move.
-        let mut order = Ids::from_slice(&[]);
-        let mut taken_inline = [false; 256];
-        let mut taken_spill = Vec::new();
-        let taken: &mut [bool] = if n <= taken_inline.len() {
-            &mut taken_inline[..n]
-        } else {
-            taken_spill.resize(n, false);
-            &mut taken_spill
-        };
+        // The slots of the cards that move, in the order they move, taken out of `from`.
+        let mut slots = Ids::from_slice(&[]);
         match draw {
             Draw::Cards(ids) => {
+                let n = src.len();
+                let mut taken_inline = [false; 256];
+                let mut taken_spill = Vec::new();
+                let taken: &mut [bool] = if n <= taken_inline.len() {
+                    &mut taken_inline[..n]
+                } else {
+                    taken_spill.resize(n, false);
+                    &mut taken_spill
+                };
                 for &id in ids {
                     // `remove_card(card)` finds nothing for a card that already moved.
                     if let Some(slot) = self.slot_of(id)
@@ -937,27 +937,33 @@ impl Areas {
                         && !taken[p]
                     {
                         taken[p] = true;
-                        order.push(p as u32);
+                        slots.push(slot as u32);
                     }
                 }
+                let mut at = 0;
+                src.retain(|_| {
+                    at += 1;
+                    !taken[at - 1]
+                });
             }
+            // `remove_card()`: the last card of a deck or discard pile, else the first. The
+            // cards that move are a run at that end.
             Draw::Next(count) => {
-                let count = count.min(n);
-                for k in 0..count {
-                    // `remove_card()`: the last card of a deck or discard pile, else the first.
-                    let p = if matches!(from.kind(), AreaType::Deck | AreaType::Discard) {
-                        n - 1 - k
-                    } else {
-                        k
-                    };
-                    taken[p] = true;
-                    order.push(p as u32);
+                let count = count.min(src.len());
+                if matches!(from.kind(), AreaType::Deck | AreaType::Discard) {
+                    for &s in src.iter().rev().take(count) {
+                        slots.push(s);
+                    }
+                    src.truncate(src.len() - count);
+                } else {
+                    for s in src.drain(..count) {
+                        slots.push(s);
+                    }
                 }
             }
         }
         let mut moved = Ids::from_slice(&[]);
-        for &p in &order {
-            let slot = src[p as usize];
+        for &slot in &slots {
             let c = &mut self.cards[slot as usize];
             moved.push(c.sort_id);
             if to.face_down() {
@@ -970,15 +976,10 @@ impl Areas {
         let dst = &mut self.lists[to as usize];
         if to.kind() == AreaType::Deck {
             // Each card goes in front of the ones before it.
-            dst.splice(0..0, order.iter().rev().map(|&p| src[p as usize]));
+            dst.splice(0..0, slots.iter().rev().copied());
         } else {
-            dst.extend(order.iter().map(|&p| src[p as usize]));
+            dst.extend_from_slice(&slots);
         }
-        let mut at = 0;
-        src.retain(|_| {
-            at += 1;
-            !taken[at - 1]
-        });
         self.lists[from as usize] = src;
         self.align(to);
         moved
