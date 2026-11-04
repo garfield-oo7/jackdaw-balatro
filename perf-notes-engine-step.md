@@ -37,9 +37,24 @@ Base Ir: random 1,153,398,836; deep env-only 671,407,972 (total 1,471,649,445, h
 | sort-hand: insertion sort of the hand on its keys | 1,140,243,200 (-1.14%) | 666,490,703 (-0.73%) | kept |
 | hand-eval: one pass for the x-of-a-kind groups, derived `Default` for `Group` | 1,141,192,754 (-1.06%) | 667,296,657 (-0.61%) | kept |
 | combo-cache: legal-card bits once per table, last-slot memo | 1,148,523,423 (-0.42%) | 669,711,077 (-0.25%) | kept |
+| shuffle-scan: sort-id order for `Areas::shuffle` by walking the sort-id index (measured against 44c4bc8: random 1,074,904,011, deep env-only 641,214,871) | 1,062,962,030 (-1.11%) | 629,274,564 (-1.86%) | kept |
 
-All six together: parity hashes unchanged, `cargo test --workspace --exclude jackdaw-py`,
-clippy `-D warnings` and `cargo fmt --check` pass.
+Commits (each verified on its own commit: both hashes, workspace tests, clippy, fmt): 9307bf0
+parse-highlighted, 5a8a8d5 queue-inline, 2e150c1 draw-next, c71e14a sort-hand, 03eac19 hand-eval,
+44c4bc8 combo-cache, 57509f6 shuffle-scan.
+
+Stack of the first six (44c4bc8) against 06b1ada: random 1,153,398,836 -> 1,074,904,011
+(-6.81%), deep env-only 671,407,972 -> 641,214,871 (-4.50%). With shuffle-scan (57509f6):
+random 1,062,962,030 (-7.84%), deep env-only 629,274,564 (-6.28%).
+
+Wall clock (medians, interleaved, contended; per idea 7 runs, all within noise): six-idea stack
+random 3.694 -> 3.386 us/step (-8.3%), deep 9.655 -> 9.534 us/step (-1.3%; the deep figure
+includes the benchmark heuristic, about half its time). Seven-idea stack (57509f6) against
+06b1ada, 11 interleaved runs each: random 3.532 -> 3.220 us/step (-8.8%), deep 9.743 -> 9.502
+us/step (-2.5%).
+
+Also on 57509f6: `uv run pytest` 2315 passed (15 deselected), `ruff check .` clean.
+
 
 ## Rejected
 
@@ -53,7 +68,5 @@ clippy `-D warnings` and `cargo fmt --check` pass.
 
 ## Open ideas (not done)
 
-- `Areas::shuffle`'s pre-sort by sort id (about 1% of random Ir): a scan of `by_sort` would do it
-  in O(max sort id); needs a guard for runs with many created cards.
 - A `DrawCard` run as one event (about 2% of random Ir in queueing and popping draws): a larger
   change to the queue's shape.
