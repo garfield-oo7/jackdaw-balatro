@@ -376,37 +376,11 @@ impl Game {
     /// `G.hand:sort()` with `G.hand.config.sort` (cardarea.lua:577-590).
     pub(crate) fn sort_hand(&mut self) {
         let suit = self.gs.hand_sort == HandSort::SuitDesc;
-        let hand = self.gs.areas.hand();
         // get_nominal is unique per card (unique_val), so the order is total and every correct
-        // sort gives the same hand. After a draw only the new last card is out of place: move it
-        // into position.
-        let n = hand.len();
-        let mut keys = [0.0; 64];
-        if (2..=keys.len()).contains(&n) {
-            for (k, c) in keys.iter_mut().zip(hand.iter()) {
-                *k = c.get_nominal(suit);
-            }
-            let (rest, last) = (&keys[..n - 1], keys[n - 1]);
-            if rest.windows(2).all(|w| w[0] > w[1]) {
-                let at = rest.partition_point(|&k| k > last);
-                self.gs.areas.move_card(AreaId::Hand, n - 1, at);
-                return;
-            }
-            // Otherwise sort the positions by their keys, then move each card once.
-            let mut order = [0usize; 64];
-            for (i, slot) in order.iter_mut().enumerate().take(n) {
-                *slot = i;
-            }
-            order[..n]
-                .sort_by(|&a, &b| keys[b].partial_cmp(&keys[a]).expect("nominals are finite"));
-            self.gs.areas.reorder(AreaId::Hand, &order[..n]);
-            return;
-        }
-        self.gs.areas.sort_by(AreaId::Hand, |a, b| {
-            b.get_nominal(suit)
-                .partial_cmp(&a.get_nominal(suit))
-                .expect("nominals are finite")
-        });
+        // sort gives the same hand.
+        self.gs
+            .areas
+            .sort_desc_by_key(AreaId::Hand, |c| c.get_nominal(suit));
     }
 
     /// `update_draw_to_hand`'s event (game.lua:3219-3244).

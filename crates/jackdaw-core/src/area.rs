@@ -763,6 +763,37 @@ impl Areas {
         self.lists[id as usize].sort_by(|&a, &b| cmp(&cards[a as usize], &cards[b as usize]));
     }
 
+    /// Sort area `id` stably by `key`, largest first (`key` is never NaN). An insertion sort on
+    /// the keys: after a draw only the new cards at the end are out of place, and they move in
+    /// one pass.
+    pub fn sort_desc_by_key(&mut self, id: AreaId, key: impl Fn(&Card) -> f64) {
+        let cards = &self.cards;
+        let list = &mut self.lists[id as usize];
+        let mut keys_inline = [0.0; 16];
+        let mut keys_spill = Vec::new();
+        let keys: &mut [f64] = if list.len() <= keys_inline.len() {
+            &mut keys_inline[..list.len()]
+        } else {
+            keys_spill.resize(list.len(), 0.0);
+            &mut keys_spill
+        };
+        for (k, &s) in keys.iter_mut().zip(list.iter()) {
+            *k = key(&cards[s as usize]);
+            debug_assert!(!k.is_nan());
+        }
+        for i in 1..keys.len() {
+            let (k, s) = (keys[i], list[i]);
+            let mut j = i;
+            while j > 0 && keys[j - 1] < k {
+                keys[j] = keys[j - 1];
+                list[j] = list[j - 1];
+                j -= 1;
+            }
+            keys[j] = k;
+            list[j] = s;
+        }
+    }
+
     /// Move the card at position `from` of area `id` to position `to`, shifting the cards
     /// between.
     pub fn move_card(&mut self, id: AreaId, from: usize, to: usize) {
