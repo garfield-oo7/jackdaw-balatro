@@ -1068,7 +1068,20 @@ impl Areas {
         let list = &mut self.lists[id as usize];
         // pseudoshuffle sorts by sort_id first when the entries carry one (misc_functions.lua),
         // then swaps.
-        if !list.is_sorted_by_key(|&s| cards[s as usize].sort_id) {
+        if list.is_sorted_by_key(|&s| cards[s as usize].sort_id) {
+            // Already in order.
+        } else if self.by_sort.len() <= 2 * list.len() + Ids::INLINE {
+            // Few sort ids beyond the area's own: walking the sort-id index in order meets the
+            // area's cards by sort id (an area holds exactly the slots whose home is it).
+            let mut k = 0;
+            for &slot in &self.by_sort {
+                if slot != NO_SLOT && self.home[slot as usize] == id as u8 {
+                    list[k] = slot;
+                    k += 1;
+                }
+            }
+            debug_assert_eq!(k, list.len());
+        } else {
             // Sort ids are unique, so any sort gives the stable sort's order. The sort runs on
             // (sort id, slot) words, away from the cards.
             let mut keyed_inline = [0u64; 256];
