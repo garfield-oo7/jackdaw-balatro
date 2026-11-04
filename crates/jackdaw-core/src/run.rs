@@ -294,12 +294,9 @@ impl Game {
         if !(1..=8).contains(&spec.stake) {
             return Err(format!("stake {} is not 1 to 8", spec.stake));
         }
-        let mut gs = init_game_object(&spec.seed);
-        gs.back = back;
-        gs.stake = f64::from(spec.stake);
-        gs.challenge = spec.challenge.map(str::to_owned);
+        // Built in place: the game state is made in its slot, not moved there.
         let mut g = Game {
-            gs,
+            gs: init_game_object(&spec.seed),
             rt: Runtime {
                 state: LuaState::BlindSelect,
                 state_complete: false,
@@ -307,6 +304,9 @@ impl Game {
             },
             trace: crate::trace::ScoreTrace::default(),
         };
+        g.gs.back = back;
+        g.gs.stake = f64::from(spec.stake);
+        g.gs.challenge = spec.challenge.map(str::to_owned);
         g.apply_stake();
         g.back_apply_to_run();
         if let Some(ch) = challenge {
@@ -666,11 +666,10 @@ impl Game {
         crate::rng::shuffle(&mut order, self.gs.rng.seed("shuffle"));
         let first = self.gs.sim.next_sort_id;
         self.gs.sim.next_sort_id += n as u32;
-        let mut deck: Vec<Card> = Vec::with_capacity(n);
-        for &k in &order {
-            let mut card = t.cards[k];
+        // Copied, then numbered: each card is copied once, straight into its slot.
+        let mut deck: Vec<Card> = order.iter().map(|&k| t.cards[k]).collect();
+        for (card, &k) in deck.iter_mut().zip(&order) {
             card.sort_id = first + k as u32;
-            deck.push(card);
         }
         self.finish_deck(deck);
     }
