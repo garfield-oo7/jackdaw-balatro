@@ -38,8 +38,25 @@ per-patch numbers against the base are in the commits.
 | encode_playing_cards tables | not pursued | | divisions already folded into switch tables by LLVM; ~90-137 Ir/card, <1% possible |
 | G_RATIO log1p memo | not pursued | | ~0.25% of random |
 
-Combined wall-clock so far (contended, 9 runs each, interleaved): resets 6.672 -> 6.054 us
-(-9.3%) after the first three ideas.
+## Per change, alone on 06b1ada (final)
 
-Parity on the combined tree: all three verify hashes unchanged;
-`cargo test --workspace --exclude jackdaw-py`, clippy `-D warnings`, `cargo fmt --check` pass.
+Ir (resets 5000 / random 40000 / deep 20000), base 301.39M / 1153.40M / 1463.85M:
+
+| Change (commit) | Resets | Random | Deep | Wall-clock medians, contended (resets / random / deep) |
+|---|---|---|---|---|
+| Deck copy + in-place Game (d77e913) | 278.58M (-7.6%) | 1134.17M (-1.7%) | 1458.33M (-0.4%) | -10.2% / -3.4% / noise |
+| Hash lanes (80459e9) | 287.99M (-4.4%) | 1141.69M (-1.0%) | 1460.49M (-0.2%) | -1.9% / noise / noise |
+| Round cards (9fa58c5) | 291.29M (-3.4%) | 1144.51M (-0.8%) | 1457.76M (-0.4%) | -5.6% / noise / noise |
+| RNG fast paths (db39ab1) | 292.17M (-3.1%) | 1141.39M (-1.0%) | 1455.18M (-0.6%) | -3.4% / -3.8% / -2.5% |
+| py_floordiv (60be13f) | 300.86M (-0.2%) | 1148.45M (-0.4%) | 1461.14M (-0.2%) | unresolvable (noise) |
+| All together (branch tip) | 245.43M (-18.6%) | 1096.70M (-4.9%) | 1437.50M (-1.8%) | 6.928 -> 5.245 us (-24%) / 3.720 -> 3.502 us (-5.9%) / 9.742 -> 9.348 us (-4.0%) |
+
+Wall-clock: interleaved A/B, medians of 9 (resets 100000) or 7 (rollout 300000, 200000
+--deep) runs, profiling-profile binaries, 4 cores shared with two other engineers (about
++-5% run to run): single small changes are within noise; the combined one is not.
+
+Each change alone on 06b1ada: all three verify hashes unchanged, fmt, clippy -D warnings,
+cargo test --workspace --exclude jackdaw-py pass. Branch tip: the same, plus uv run pytest
+(2315 passed) and ruff.
+
+For an upstream pull request, leave this file out.
