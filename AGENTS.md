@@ -27,6 +27,41 @@ CLAUDE.md out of pull requests to the upstream repository.
   were measured) and how each speed-up was achieved, and nothing more.
 - Don't rewrite history that has been pushed, or force-push, without the owner's go-ahead.
 
+## Before a pull request goes upstream
+
+Lessons from the maintainer's review of #39–#41 (fixed in upstream #42 and #44). Check each one
+before handing the owner a branch.
+
+- **Public interfaces keep their shape.** A speed-up keeps every public signature and return
+  value, `jackdaw._core` included: Jackdaw Arena and agents call it directly. Add an opt-in
+  (a keyword argument) instead of changing what an existing call returns, and pin the old form
+  with a test. (#42: `_core.GymEnv.reset`/`step` had started returning the mask with the
+  observation; upstream made it `mask=True`.)
+- **Replacing a dependency keeps what users saw of it.** List the environment variables,
+  defaults and knobs the old one read, and keep each. (#44: `num_threads=0` stopped honouring
+  `RAYON_NUM_THREADS` when the pool replaced rayon.)
+- **Bound untrusted input before it sizes anything.** Snapshot imports, files and environment
+  variables are checked for range before they become an allocation or an index. (#42: one huge
+  sort id in a snapshot aborted the process.)
+- **Docs say what the code does, costs included.** When a review, a test or a benchmark finds
+  the code and its docs disagree, fix one of them in the same pull request; "pre-existing" is
+  no reason to ship it. (#44: idle threads polled 200 µs, not the documented 100, which our own
+  review had flagged; a step does wait for a thread descheduled mid-env.)
+- **Opt-in shared buffers name the wrappers they break with.** `copy=False` style options say
+  which common wrappers hold an observation across a reset (SB3's `DummyVecEnv`, gymnasium's
+  `SyncVectorEnv` in SAME_STEP mode) and so need the default.
+- **CI and release changes have run before review.** Run a changed workflow on the fork
+  (Actions → workflow → Run workflow) for every leg it touches, and make the workflow install
+  every tool its scripts need. (#44: the PGO legs needed `setup-uv`.)
+- **Build and release steps install pinned dependencies,** from `uv.lock` with
+  `--require-hashes`, never freshly resolved: the release build runs next on the same machine.
+- **Equality and cache-key checks over a struct destructure it**, naming every field, so a
+  field added later can't be left out of the check. (#44: `DeckTemplate::made_with`.)
+- **Every number is measured on that branch.** A speed-up quoted in a pull request or the
+  changelog is measured on that exact branch against its base, not taken from a combined run.
+- **Titles say what changes**, as a short sentence ("Faster engine and env, same runs"), not the
+  branch name.
+
 ## Game parity
 
 The engine is a 1-1 clone of Balatro 1.0.1o's Lua source. A change, a performance change
