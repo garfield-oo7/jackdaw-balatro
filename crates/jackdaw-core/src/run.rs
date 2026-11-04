@@ -162,23 +162,23 @@ fn init_game_object(seed: &str) -> GameState {
         // The streams `start_run` draws from before the first decision: the boss, the voucher,
         // the blind tags, the deck's shuffle, the round's cards and the Orbital Tag hands, and
         // the voucher's and the tags' first resamples (half the vouchers and a third of the tags
-        // are out of the first ante's pools).
+        // are out of the first ante's pools). Longest first, the order the hashes run in.
         rng: Rng::new_primed(
             seed,
             &[
-                "boss",
-                "Voucher1",
-                "Tag1",
-                "shuffle",
-                "idol1",
-                "mail1",
-                "anc1",
-                "cas1",
-                "orbital",
                 "Voucher1_resample2",
                 "Voucher1_resample3",
                 "Tag1_resample2",
                 "Tag1_resample3",
+                "Voucher1",
+                "shuffle",
+                "orbital",
+                "idol1",
+                "mail1",
+                "boss",
+                "Tag1",
+                "anc1",
+                "cas1",
             ],
         ),
         sim: SimState {

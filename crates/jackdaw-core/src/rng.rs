@@ -305,11 +305,10 @@ fn hash_steps(mut num: f64, bytes: &[u8], offset: usize) -> f64 {
 #[derive(Clone, Copy)]
 struct Lane<'a> {
     start: f64,
+    /// The result.
     num: f64,
     bytes: &'a [u8],
     offset: usize,
-    /// The chain stopped being finite: it is redone alone, with Lua's NaN rules.
-    redo: bool,
 }
 
 impl<'a> Lane<'a> {
@@ -319,33 +318,75 @@ impl<'a> Lane<'a> {
             num: start,
             bytes,
             offset,
-            redo: false,
         }
+    }
+}
+
+/// The most chains [`hash_steps_many`] runs at once.
+const MAX_LANES: usize = 16;
+
+/// `x - lua::floor(x)`. A hash step's `x` is positive (or not finite), and below 2^52 the floor
+/// of a positive double is its truncation, without [`lua::floor`]'s other cases.
+#[inline]
+fn frac(x: f64) -> f64 {
+    if x > 0.0 && x < 4_503_599_627_370_496.0 {
+        x - x as i64 as f64
+    } else {
+        x - lua::floor(x)
     }
 }
 
 /// [`hash_steps`] for several chains side by side. Each step of a chain waits on its division,
 /// and the chains don't depend on each other, so the processor overlaps their divisions.
+///
+/// The chains run longest first, so those still running at each step are a prefix. A chain
+/// that stops being finite ends as NaN (a step from a non-finite value gives NaN, and finite
+/// steps give finite values), and is then redone alone with Lua's NaN rules ([`hash_steps`]).
 fn hash_steps_many(lanes: &mut [Lane<'_>]) {
-    let longest = lanes.iter().map(|l| l.bytes.len()).max().unwrap_or(0);
+    let n = lanes.len();
+    assert!(n <= MAX_LANES, "{n} hash chains");
+    // An insertion sort: the callers' chains come nearly sorted.
+    let mut order = [0usize; MAX_LANES];
+    for j in 0..n {
+        let len = lanes[j].bytes.len();
+        let mut at = j;
+        while at > 0 && lanes[order[at - 1]].bytes.len() < len {
+            order[at] = order[at - 1];
+            at -= 1;
+        }
+        order[at] = j;
+    }
+    let mut num = [0.0f64; MAX_LANES];
+    let mut bytes: [&[u8]; MAX_LANES] = [&[]; MAX_LANES];
+    // The 1-based position of each chain's last byte in its hashed string.
+    let mut last = [0i64; MAX_LANES];
+    for (s, &j) in order[..n].iter().enumerate() {
+        let lane = &lanes[j];
+        num[s] = lane.start;
+        bytes[s] = lane.bytes;
+        last[s] = (lane.offset + lane.bytes.len()) as i64;
+    }
+    let longest = bytes[0].len();
+    let mut running = n;
     for t in 0..longest {
-        for lane in lanes.iter_mut() {
-            if t >= lane.bytes.len() || lane.redo {
-                continue;
-            }
-            let k = lane.bytes.len() - 1 - t;
-            let i = lane.offset + k + 1;
-            let s = 1.123_928_502_3 / lane.num * f64::from(lane.bytes[k]) * lua::PI
-                + lua::PI * i as f64;
-            if s.is_finite() {
-                lane.num = s - lua::floor(s);
-            } else {
-                lane.redo = true;
-            }
+        while bytes[running - 1].len() <= t {
+            running -= 1;
+        }
+        for s in 0..running {
+            let b = bytes[s];
+            let byte = b[b.len() - 1 - t];
+            let i = last[s] - t as i64;
+            let x = 1.123_928_502_3 / num[s] * f64::from(byte) * lua::PI + lua::PI * i as f64;
+            num[s] = frac(x);
         }
     }
-    for lane in lanes.iter_mut().filter(|l| l.redo) {
-        lane.num = hash_steps(lane.start, lane.bytes, lane.offset);
+    for (s, &j) in order[..n].iter().enumerate() {
+        let lane = &mut lanes[j];
+        lane.num = if num[s].is_nan() {
+            hash_steps(lane.start, lane.bytes, lane.offset)
+        } else {
+            num[s]
+        };
     }
 }
 
@@ -623,7 +664,7 @@ impl Rng {
     /// [`Rng::prime`], also hashing the run seed itself (`pseudohash(seed)`, the seed half of
     /// an empty key) when `hash_seed`.
     fn prime_with(&mut self, keys: &[&str], hash_seed: bool) {
-        const MAX: usize = 16;
+        const MAX: usize = MAX_LANES;
         assert!(keys.len() < MAX, "priming {} streams", keys.len());
         let mut fresh: [&[u8]; MAX] = [&[]; MAX];
         let mut n = 0;
@@ -824,5 +865,71 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(sorted, (1..=52).collect::<Vec<_>>());
         assert_ne!(v, sorted);
+    }
+
+    /// A small deterministic generator for the property tests.
+    fn xorshift(seed: u64) -> impl FnMut() -> u64 {
+        let mut x = seed;
+        move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        }
+    }
+
+    /// Side by side, longest first, each chain ends as [`hash_steps`] ends it alone, bugged
+    /// (NaN) chains and starts included.
+    #[test]
+    fn hash_steps_many_matches_hash_steps() {
+        let mut next = xorshift(0x9E37_79B9_7F4A_7C15);
+        let starts = [
+            1.0,
+            0.0,
+            -0.0,
+            f64::NAN,
+            f64::from_bits(lua::DEFAULT_NAN_BITS),
+            0.5,
+            1e-300,
+        ];
+        let nan_seed = b"erratic7LB2WVPK";
+        let mut strings: Vec<Vec<u8>> = Vec::new();
+        for case in 0..20_000 {
+            strings.clear();
+            let n = (next() % (MAX_LANES as u64 + 1)) as usize;
+            for _ in 0..n {
+                let len = (next() % 32) as usize;
+                let s: Vec<u8> = if next().is_multiple_of(50) {
+                    nan_seed.to_vec()
+                } else {
+                    (0..len).map(|_| b'0' + (next() % 75) as u8).collect()
+                };
+                strings.push(s);
+            }
+            let mut lanes: Vec<Lane<'_>> = strings
+                .iter()
+                .map(|s| {
+                    let start = if next().is_multiple_of(8) {
+                        starts[(next() % starts.len() as u64) as usize]
+                    } else {
+                        (next() >> 11) as f64 / (1u64 << 53) as f64
+                    };
+                    Lane::new(start, s, (next() % 20) as usize)
+                })
+                .collect();
+            let expected: Vec<u64> = lanes
+                .iter()
+                .map(|l| hash_steps(l.start, l.bytes, l.offset).to_bits())
+                .collect();
+            hash_steps_many(&mut lanes);
+            let got: Vec<u64> = lanes.iter().map(|l| l.num.to_bits()).collect();
+            assert_eq!(got, expected, "case {case}");
+        }
+        // A bugged seed: the key half reaches zero.
+        let mut tail = [Lane::new(1.0, b"7LB2WVPK", 7)];
+        hash_steps_many(&mut tail);
+        let mut head = [Lane::new(tail[0].num, b"erratic", 0)];
+        hash_steps_many(&mut head);
+        assert_eq!(head[0].num.to_bits(), lua::DEFAULT_NAN_BITS);
     }
 }
