@@ -23,6 +23,10 @@ CLAUDE.md out of pull requests to the upstream repository.
   repository `TylerFlar/jackdaw-balatro`: no commits, pushes or branches there.
 - Pull requests to upstream are opened by the fork's owner, against upstream's `dev` branch
   (see CONTRIBUTING.md). An agent prepares the branch on the fork and the description.
+- A branch for an upstream pull request starts from upstream's `dev`
+  (`git fetch https://github.com/TylerFlar/jackdaw-balatro dev`), never from the fork's `main`,
+  which carries this file and CLAUDE.md. Before handing it over, check that
+  `git diff --stat FETCH_HEAD..BRANCH` lists neither file.
 - A pull request with performance work states the headline numbers (before and after, how they
   were measured) and how each speed-up was achieved, and nothing more.
 - Don't rewrite history that has been pushed, or force-push, without the owner's go-ahead.
