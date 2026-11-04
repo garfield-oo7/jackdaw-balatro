@@ -16,7 +16,8 @@ while it is 0.x, a minor release (0.2 → 0.3) can break things, and a patch rel
   drawn from the episode's seed instead of Python's global `random`, which nothing seeded. The
   unseeded episodes (`f"{seed_prefix}_{n}"`) start the same runs in every process too. So a seed
   can now start a different back or stake than it did before; with one back and one stake (the
-  default) nothing changes.
+  default) nothing changes. A seed reused across episodes now always gets the same back and
+  stake: for variety over decks and stakes, use more seeds.
 
 ## [0.2.3] - 2026-11-03
 
