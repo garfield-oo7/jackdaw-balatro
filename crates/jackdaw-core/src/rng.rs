@@ -97,13 +97,20 @@ fn warm(word: usize, u: u64) -> u64 {
 impl Tw223 {
     /// `math.randomseed(d)` (`random_seed` in `lj_prng.c`).
     pub fn seeded(d: f64) -> Self {
+        // From a NaN every step is a NaN, which needs Lua's NaN rules; from any other value no
+        // step makes one, and plain arithmetic gives the same bits.
+        let nan = d.is_nan();
         let mut d = d;
         let mut u = [0u64; 4];
         let mut r: u32 = 0x1109_0601; // 64 - k[i] as four bytes
         for (i, slot) in u.iter_mut().enumerate() {
             let m = 1u64 << (r & 0xFF);
             r >>= 8;
-            d = lua::add(lua::mul(d, lua::PI), lua::E);
+            d = if nan {
+                lua::add(lua::mul(d, lua::PI), lua::E)
+            } else {
+                d * lua::PI + lua::E
+            };
             let mut bits = d.to_bits();
             if bits < m {
                 bits += m; // make sure the top k[i] bits are not all zero
@@ -132,13 +139,25 @@ impl Tw223 {
     /// `math.random(m)`: an integer in `[1, m]`.
     #[inline]
     pub fn random_n(&mut self, m: i64) -> i64 {
-        crate::lua::floor(self.random() * m as f64) as i64 + 1
+        floor_scaled(self.random(), m) + 1
     }
 
     /// `math.random(m, n)`: an integer in `[m, n]`.
     #[inline]
     pub fn random_range(&mut self, m: i64, n: i64) -> i64 {
-        crate::lua::floor(self.random() * (n - m + 1) as f64) as i64 + m
+        floor_scaled(self.random(), n - m + 1) + m
+    }
+}
+
+/// `floor(r * k)` for a draw `r` in `[0, 1)`. For `k >= 1` the product is in `[0, k)`, where
+/// (below 2^52) the floor is the truncation, without [`crate::lua::floor`]'s other cases.
+#[inline]
+fn floor_scaled(r: f64, k: i64) -> i64 {
+    let x = r * k as f64;
+    if k >= 1 && x < 4_503_599_627_370_496.0 {
+        x as i64
+    } else {
+        crate::lua::floor(x) as i64
     }
 }
 
@@ -406,10 +425,17 @@ fn hash_steps_lua(mut num: f64, bytes: &[u8], offset: usize) -> f64 {
 /// One step of a stream: `math.abs(tonumber(string.format("%.13f", (2.134453429141 + s*1.72431234) % 1)))`.
 #[inline]
 fn advance(state: f64) -> f64 {
-    let raw = lua::modulo(
-        lua::add(2.134_453_429_141, lua::mul(state, 1.724_312_34)),
-        1.0,
-    );
+    let x = 2.134_453_429_141 + state * 1.724_312_34;
+    // While `x` is finite no step makes a NaN, and plain arithmetic gives the NaN-aware
+    // helpers' bits (`x % 1` is then `x - floor(x)`).
+    let raw = if x.is_finite() {
+        x - lua::floor(x)
+    } else {
+        lua::modulo(
+            lua::add(2.134_453_429_141, lua::mul(state, 1.724_312_34)),
+            1.0,
+        )
+    };
     lua::truncate13(raw).abs()
 }
 
@@ -931,5 +957,85 @@ mod tests {
         let mut head = [Lane::new(tail[0].num, b"erratic", 0)];
         hash_steps_many(&mut head);
         assert_eq!(head[0].num.to_bits(), lua::DEFAULT_NAN_BITS);
+    }
+
+    /// `Tw223::seeded` with the NaN-aware helpers throughout.
+    fn seeded_lua(d: f64) -> [u64; 4] {
+        let mut d = d;
+        let mut u = [0u64; 4];
+        let mut r: u32 = 0x1109_0601;
+        for (i, slot) in u.iter_mut().enumerate() {
+            let m = 1u64 << (r & 0xFF);
+            r >>= 8;
+            d = lua::add(lua::mul(d, lua::PI), lua::E);
+            let mut bits = d.to_bits();
+            if bits < m {
+                bits += m;
+            }
+            *slot = warm(i, bits);
+        }
+        u
+    }
+
+    /// The plain-arithmetic paths give the NaN-aware helpers' bits, for any double.
+    #[test]
+    fn fast_paths_match_lua_helpers() {
+        let mut next = xorshift(0x2545_F491_4F6C_DD1D);
+        let specials = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::from_bits(lua::DEFAULT_NAN_BITS),
+            f64::from_bits(lua::POSITIVE_NAN_BITS),
+            1e300,
+            -1e300,
+            f64::MAX,
+            4_503_599_627_370_496.0,
+            1e-310,
+        ];
+        for i in 0..300_000 {
+            let d = match specials.get(i) {
+                Some(&d) => d,
+                None if i % 2 == 0 => f64::from_bits(next()),
+                None => (next() >> 11) as f64 / (1u64 << 53) as f64,
+            };
+            assert_eq!(Tw223::seeded(d).words(), seeded_lua(d), "seeded({d:e})");
+            let slow = lua::truncate13(lua::modulo(
+                lua::add(2.134_453_429_141, lua::mul(d, 1.724_312_34)),
+                1.0,
+            ))
+            .abs();
+            assert_eq!(advance(d).to_bits(), slow.to_bits(), "advance({d:e})");
+        }
+        let ks = [
+            i64::MIN,
+            -52,
+            -1,
+            0,
+            1,
+            2,
+            52,
+            1 << 40,
+            1 << 53,
+            (1 << 53) + 1,
+            i64::MAX,
+        ];
+        let mut tw = Tw223::seeded(0.25);
+        for i in 0..200_000 {
+            let r = if i < 4 {
+                [0.0, f64::EPSILON, 0.5, 1.0 - f64::EPSILON / 2.0][i]
+            } else {
+                tw.random()
+            };
+            for &k in &ks {
+                let slow = lua::floor(r * k as f64) as i64;
+                assert_eq!(floor_scaled(r, k), slow, "floor({r:e} * {k})");
+            }
+        }
     }
 }
