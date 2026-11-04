@@ -254,6 +254,16 @@ impl Game {
         self.set_debuff_at(area, i, false);
     }
 
+    /// [`Game::blind_debuff_hand`] reads the hand and its poker hands, not only the number of
+    /// cards: the blind's debuff names a hand, or it is The Eye, The Mouth, The Arm or The Ox.
+    pub(crate) fn blind_reads_hand(&self) -> bool {
+        jackdaw_data::lookup(self.blind_debuff(), "hand").is_some()
+            || matches!(
+                self.blind_name(),
+                "The Eye" | "The Mouth" | "The Arm" | "The Ox"
+            )
+    }
+
     /// `Blind:debuff_hand(cards, hand, handname, check)` (blind.lua:519-570). `cards` is the
     /// number of cards in the hand.
     pub(crate) fn blind_debuff_hand(

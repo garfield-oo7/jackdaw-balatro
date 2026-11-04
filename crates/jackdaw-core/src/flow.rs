@@ -4,7 +4,7 @@
 use crate::area::{AreaId, Draw};
 use crate::event::Event;
 use crate::game::{Game, LuaState};
-use crate::hand_eval::get_poker_hand_info;
+use crate::hand_eval::{HandType, PokerHands, get_poker_hand_info};
 use crate::state::{BlindSlot, HandSort};
 
 /// `G.hand.config.highlighted_limit`.
@@ -40,8 +40,28 @@ impl Game {
 
     /// `CardArea:parse_highlighted()` (cardarea.lua:162-185): only the blind's `triggered`
     /// flag is gameplay state here (`debuff_hand` in check mode).
+    ///
+    /// Only a blind that reads the hand ([`Game::blind_reads_hand`]) needs it evaluated: any
+    /// other blind's check looks at the number of cards alone, and every non-empty selection has
+    /// a hand (High Card at least).
     pub(crate) fn parse_highlighted(&mut self) {
+        if self.gs.blind.as_ref().is_none_or(|b| b.disabled) {
+            // `Blind:debuff_hand` does nothing (blind.lua:520).
+            return;
+        }
         let areas = &self.gs.areas;
+        if !self.blind_reads_hand() {
+            let n = self
+                .rt
+                .highlighted
+                .iter()
+                .filter(|&&id| areas.card(id).is_some())
+                .count();
+            if n > 0 {
+                self.blind_debuff_hand(n, &PokerHands::default(), HandType::HighCard, true);
+            }
+            return;
+        }
         let cards = self.eval_cards(self.rt.highlighted.iter().filter_map(|&id| areas.card(id)));
         let info = get_poker_hand_info(&cards, self.eval_flags());
         if let Some(text) = info.hand {
