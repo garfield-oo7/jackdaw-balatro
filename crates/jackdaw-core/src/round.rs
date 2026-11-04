@@ -211,10 +211,7 @@ impl Game {
         if self.gs.round_resets.temp_reroll_cost.take().is_some() {
             self.calculate_reroll_cost(true);
         }
-        self.reset_idol_card();
-        self.reset_mail_rank();
-        self.reset_ancient_card();
-        self.reset_castle_card();
+        self.reset_round_cards();
         for a in AreaId::PLAYING {
             self.gs.areas.get_mut(a).for_each(|c| {
                 c.ability.discarded = false;
@@ -223,35 +220,27 @@ impl Game {
         }
     }
 
+    /// The per-round picks of `reset_idol_card`, `reset_mail_rank`, `reset_ancient_card` and
+    /// `reset_castle_card`, in that order. No pick changes a card, so the three that pick among
+    /// the cards share one candidate set.
+    pub(crate) fn reset_round_cards(&mut self) {
+        let candidates = NonStone::of(self);
+        self.reset_idol_card(&candidates);
+        self.reset_mail_rank(&candidates);
+        self.reset_ancient_card();
+        self.reset_castle_card(&candidates);
+    }
+
     /// A per-round pick (`pseudorandom_element` with `pseudoseed(key .. ante)`) among the
-    /// playing cards that aren't Stone Cards, drawn only when there is one.
-    fn non_stone_pick(&mut self, key: &str) -> Option<crate::card::Base> {
-        // Marble's pending stones are Stone Cards: the areas hold every other playing card.
-        // The candidates' sort ids as a bitmap (sort ids stay below the next one to hand out).
-        let words = (self.gs.sim.next_sort_id as usize).div_ceil(64).max(1);
-        let mut inline = [0u64; 32];
-        let mut spill: Vec<u64> = Vec::new();
-        let bits: &mut [u64] = if words <= inline.len() {
-            &mut inline[..words]
-        } else {
-            spill.resize(words, 0);
-            &mut spill
-        };
-        let mut n = 0;
-        for c in self.playing_cards() {
-            if !c.is_stone() {
-                let id = c.sort_id as usize;
-                bits[id / 64] |= 1 << (id % 64);
-                n += 1;
-            }
-        }
-        if n == 0 {
+    /// playing cards that aren't Stone Cards (`candidates`), drawn only when there is one.
+    fn non_stone_pick(&mut self, candidates: &NonStone, key: &str) -> Option<crate::card::Base> {
+        if candidates.n == 0 {
             return None;
         }
         // `pseudorandom_element` sorts cards by sort id: the pick is the r-th smallest.
-        let mut r = crate::rng::element_index(n, self.ante_seed(key)) as u32;
+        let mut r = crate::rng::element_index(candidates.n, self.ante_seed(key)) as u32;
         let mut pick = 0;
-        for (w, &word) in bits.iter().enumerate() {
+        for (w, &word) in candidates.bits().iter().enumerate() {
             let ones = word.count_ones();
             if r < ones {
                 let mut word = word;
@@ -279,24 +268,24 @@ impl Game {
     }
 
     /// `reset_idol_card()` (common_events.lua:2271-2286).
-    pub(crate) fn reset_idol_card(&mut self) {
+    fn reset_idol_card(&mut self, candidates: &NonStone) {
         use crate::card::{Rank, Suit};
         self.gs.current_round.idol_card = (Suit::Spades, Rank::Ace);
-        if let Some(base) = self.non_stone_pick("idol") {
+        if let Some(base) = self.non_stone_pick(candidates, "idol") {
             self.gs.current_round.idol_card = (base.suit, base.value);
         }
     }
 
     /// `reset_mail_rank()` (common_events.lua:2288-2301).
-    pub(crate) fn reset_mail_rank(&mut self) {
+    fn reset_mail_rank(&mut self, candidates: &NonStone) {
         self.gs.current_round.mail_card = crate::card::Rank::Ace;
-        if let Some(base) = self.non_stone_pick("mail") {
+        if let Some(base) = self.non_stone_pick(candidates, "mail") {
             self.gs.current_round.mail_card = base.value;
         }
     }
 
     /// `reset_ancient_card()` (common_events.lua:2303-2310).
-    pub(crate) fn reset_ancient_card(&mut self) {
+    fn reset_ancient_card(&mut self) {
         use crate::card::Suit;
         let current = self.gs.current_round.ancient_card;
         let mut suits = [Suit::Spades; 4];
@@ -312,9 +301,9 @@ impl Game {
     }
 
     /// `reset_castle_card()` (common_events.lua:2312-2324).
-    pub(crate) fn reset_castle_card(&mut self) {
+    fn reset_castle_card(&mut self, candidates: &NonStone) {
         self.gs.current_round.castle_card = crate::card::Suit::Spades;
-        if let Some(base) = self.non_stone_pick("cas") {
+        if let Some(base) = self.non_stone_pick(candidates, "cas") {
             self.gs.current_round.castle_card = base.suit;
         }
     }
@@ -396,5 +385,54 @@ impl Game {
         self.playing_cards()
             .filter(|c| c.get_id() == Some(9))
             .count() as f64
+    }
+}
+
+/// The playing cards that aren't Stone Cards, as a bitmap of their sort ids (sort ids stay
+/// below the next one to hand out). Marble's pending stones are Stone Cards: the areas hold
+/// every other playing card.
+struct NonStone {
+    inline: [u64; 32],
+    spill: Vec<u64>,
+    words: usize,
+    /// How many there are.
+    n: usize,
+}
+
+impl NonStone {
+    fn of(g: &Game) -> NonStone {
+        let words = (g.gs.sim.next_sort_id as usize).div_ceil(64).max(1);
+        let mut set = NonStone {
+            inline: [0; 32],
+            spill: Vec::new(),
+            words,
+            n: 0,
+        };
+        if words > set.inline.len() {
+            set.spill.resize(words, 0);
+        }
+        let bits: &mut [u64] = if words <= set.inline.len() {
+            &mut set.inline[..words]
+        } else {
+            &mut set.spill
+        };
+        let mut n = 0;
+        for c in g.playing_cards() {
+            if !c.is_stone() {
+                let id = c.sort_id as usize;
+                bits[id / 64] |= 1 << (id % 64);
+                n += 1;
+            }
+        }
+        set.n = n;
+        set
+    }
+
+    fn bits(&self) -> &[u64] {
+        if self.words <= self.inline.len() {
+            &self.inline[..self.words]
+        } else {
+            &self.spill
+        }
     }
 }

@@ -335,11 +335,8 @@ impl Game {
         let rr = &g.gs.round_resets;
         g.gs.current_round.discards_left = rr.discards;
         g.gs.current_round.hands_left = rr.hands;
-        g.reset_idol_card();
-        g.reset_mail_rank();
         g.gs.current_round.ancient_card = None;
-        g.reset_ancient_card();
-        g.reset_castle_card();
+        g.reset_round_cards();
         // `G.GAME.blind = Blind(...)`, `set_blind(nil, nil, true)`, `reset_blinds()`.
         g.set_blind(None, false);
         g.reset_blinds();
