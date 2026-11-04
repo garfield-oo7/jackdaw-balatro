@@ -7,6 +7,105 @@
 
 ---
 
+> [!NOTE]
+> **Fork notes (garfield-oo7/jackdaw-balatro only; not for upstream).** The section below tracks
+> performance work in progress on this fork. Leave it out of any pull request to upstream, like
+> AGENTS.md and CLAUDE.md.
+
+## Fork: performance work in progress
+
+Three branches on this fork, each started from upstream `dev` (`06b1ada`), make the engine and
+the envs faster without changing the game. None is ready for upstream yet: see
+[Before an upstream pull request](#before-an-upstream-pull-request).
+
+| Branch | Tip | What it does |
+|---|---|---|
+| `perf/wip-vector-env` | `11652a1` | `BalatroVectorEnv` in `SAME_STEP` mode resets an ended episode in the same engine call as the step (one call instead of two); a sub-env that resets ignores its action, even a negative one |
+| `perf/wip-reset-obs` | `9c3a4b5` | Five changes to starting a run (deck copy, RNG hashing and arithmetic, the round's card picks, one observation division) and a `resets` benchmark example |
+| `perf/wip-engine-step` | `d7d0391` | Seven changes to the step path (hand evaluation on highlight, card draws, hand sort, pair/three/four grouping, action-table cache, shuffle, an inlined event queue) |
+| `fix/seeded-episode-starts` | `2512a30` | With several `back_keys` or `stakes`, the back and stake come from the episode's seed, so `reset(seed=s)` always starts the same run |
+
+Each perf branch has a `perf-notes-*.md` at its root listing every idea tried, its numbers, and
+the ones rejected and why.
+
+### Measured gains
+
+Rust benchmarks, pinned to one core (`taskset -c 3`), 20 interleaved rounds, medians, quiet
+4-core machine:
+
+| Variant | Random-policy step | `--deep` step | Reset |
+|---|---|---|---|
+| Base (upstream `dev`) | 3.575 µs | 9.634 µs | 6.905 µs |
+| `perf/wip-reset-obs` | −5.6% | −3.0% | −22.5% |
+| `perf/wip-engine-step` | −10.9% | −2.5% | no change |
+| All three combined | −16.7% | −7.6% | −19.7% |
+
+`BalatroVectorEnv` `SAME_STEP`, one call against two in the same process, 600 alternating
+blocks, 4 threads: +17% env-steps/s at 16 envs, +10% at 64, +12% at 256 (the middle half of the
+paired ratios lies above 1 at every size). `NEXT_STEP` is unchanged.
+
+Instruction counts (callgrind), which have no run-to-run noise, agree: the reset branch executes
+18.6% fewer instructions per reset, and the engine branch 7.8% fewer per random-policy step.
+
+Single commits can't be told apart in wall-clock time (each saves 1-3%; runs vary by 5-8%). Two
+are unproven: force-inlining `Game::queue` (`5a8a8d5`) and the action table's legal-card cache
+(`44c4bc8`) make the random step 3-5 points faster but `--deep` slightly slower.
+
+### Before an upstream pull request
+
+From a review of all three branches (no parity problem found; the three merge cleanly, and the
+merge passes both hashes, `cargo test`, `uv run pytest`, clippy and ruff):
+
+1. **`perf/wip-vector-env`**
+   - **Blocking:** `_core.VectorEnv.set_autoreset` checks only that the back exists. It must
+     validate each start as a new run does (the back is a deck, the stake is 1-8, the challenge
+     is valid). Today a stake of 9 fails in the middle of a step, after other envs have stepped,
+     leaving an env ended and not reset. `BalatroVectorEnv` can't reach this; direct `_core`
+     callers (Jackdaw Arena) can.
+   - Correct the doc of `VectorEnv::step_autoreset`: a failed reset fails after the envs stepped.
+   - Raise an episode-count overflow as `ValueError` or `OverflowError`, not `IndexError`.
+   - Move the negative-action fix into its own commit (or its own pull request).
+   - Run the Python fused-vs-two-call equivalence test with `copy=True` too.
+2. **`perf/wip-reset-obs`**: reword the message of `80459e9` (the code falls back to
+   `lua::floor` for any value outside (0, 2^52), not only "positive" ones). The integer division
+   (`60be13f`) is optional: too small to measure.
+3. **`perf/wip-engine-step`**: correct the messages of `c71e14a` (on equal keys the old fast path
+   put the card before its equals) and `57509f6` (measured against `44c4bc8`, not `06b1ada`; drop
+   its `resets` claim). Drop `5a8a8d5` and `44c4bc8` unless a measurement shows a gain.
+4. **All three**: rebuild each branch from upstream `dev` without its `perf-notes-*.md`, add a
+   CHANGELOG line, and re-measure every number in the pull request on that branch against `dev`
+   (AGENTS.md). One pull request per branch.
+
+### Checking parity
+
+On every branch, before every commit:
+
+```bash
+cargo run --release -p jackdaw-env --example rollout 300000 --verify          # 1d7a46c86f811c53
+cargo run --release -p jackdaw-env --example rollout 200000 --verify --deep   # df57b9920117639a
+cargo run --release -p jackdaw-env --example resets 20000 --verify            # 16704def8fcaca77 (where the example exists)
+```
+
+Then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace --exclude jackdaw-py`, `uv run pytest` and `ruff check .`.
+
+### Measuring without noise
+
+A single timing run on a shared machine varies by 5-8%, more than most single changes save.
+
+- Use instruction counts as the first evidence: build with `cargo build --profile profiling -p
+  jackdaw-env --example rollout`, then run `valgrind --tool=callgrind` on it. Callgrind counts
+  `rep stos`/`rep movs` once per iteration, so `memset`/`memcpy` look larger than they are.
+- For wall-clock time, pin each run to one core (`taskset -c 3`), interleave base and change
+  (rotate the order each round), take at least 20 rounds, and compare medians and the middle
+  half of the runs. Run nothing else meanwhile.
+- `--deep` includes the benchmark's own heuristic (about half its time), so it understates
+  env-side gains.
+- For the vector env, compare variants in one process in alternating blocks (paired ratios);
+  separate processes vary too much.
+
+---
+
 Jackdaw is a Balatro simulator built for RL research: a bit-exact Balatro 1.0.1o engine written in Rust with a Python interface, Gymnasium-style environments (single and vectorized) with entity-based observations and a factored action space, and a bridge that plays live Balatro in lockstep through [BalatroBot](https://github.com/coder/balatrobot).
 
 ## Motivation
