@@ -537,6 +537,21 @@ fn finite(x: f64) -> f64 {
 
 /// Python's `a // b` on numbers (`float_floor_div`); integers give the same result.
 fn py_floordiv(a: f64, b: f64) -> f64 {
+    // A whole `a` in [+0, 2^53) over a whole `b` in [1, 2^53): the integer quotient, which the
+    // general path computes exactly, without its `fmod` and `floor` library calls.
+    const TWO_53: f64 = 9_007_199_254_740_992.0;
+    if a.to_bits() < TWO_53.to_bits()
+        && (1.0..TWO_53).contains(&b)
+        && a as u64 as f64 == a
+        && b as u64 as f64 == b
+    {
+        return (a as u64 / b as u64) as f64;
+    }
+    py_floordiv_general(a, b)
+}
+
+/// [`py_floordiv`] for any operands.
+fn py_floordiv_general(a: f64, b: f64) -> f64 {
     let m = a % b;
     let mut div = (a - m) / b;
     if m != 0.0 && ((b < 0.0) != (m < 0.0)) {
@@ -1381,6 +1396,38 @@ mod tests {
         assert_eq!(py_floordiv(-1.0, 5.0), -1.0);
         assert_eq!(py_floordiv(0.0, 5.0).to_bits(), 0.0f64.to_bits());
         assert_eq!(py_floordiv(12.5, 5.0), 2.0);
+        let values = [
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            -1.0,
+            4.0,
+            5.0,
+            6.0,
+            24.0,
+            25.0,
+            26.0,
+            1e15,
+            9_007_199_254_740_991.0,
+            9_007_199_254_740_992.0,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+        let mut all: Vec<f64> = values.to_vec();
+        all.extend((-40..400).map(|i| f64::from(i) / 2.0));
+        for &a in &all {
+            for &b in &values {
+                if b == 0.0 {
+                    continue;
+                }
+                assert_eq!(
+                    py_floordiv(a, b).to_bits(),
+                    py_floordiv_general(a, b).to_bits(),
+                    "{a} // {b}"
+                );
+            }
+        }
         assert_eq!(log_scale(0.0), 0.0);
         assert_eq!(log_scale(3.0), 2.0);
         assert_eq!(log_scale(-3.0), -2.0);
